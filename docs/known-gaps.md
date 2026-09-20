@@ -272,6 +272,16 @@ sudo bash scripts/serve-acceptance.sh
 
 ## From H7 acceptance — a local deploy hung in Healthcheck, unexplained
 
+**Re-tested 2026-09-20 on kyy-acer (Ubuntu 26.04, Podman 5.7, root acceptance): the
+hang did not reproduce.** `scripts/serve-acceptance.sh` check 8 — the in-process
+fallback deploy, the exact check that hung for 180s on three runs in August —
+reached `Done` cleanly, 14/14, and every other acceptance suite passes too
+(`verify-all.sh` → ALL ACCEPTANCE: PASS). The most plausible original trigger is
+host/podman-version specific: `podman healthcheck run` behavior changed between
+the 4.x-era host where the hang was recorded and 5.7, and the stage's bound is
+read-only data — its per-attempt timeout and kill-on-drop are pinned by tests
+(`poll_health_*` budget tests, `local_executor_kills_child_when_future_is_dropped`).
+
 `scripts/serve-acceptance.sh` check 8 fails: the in-process fallback deploy hangs in the Healthcheck
 stage until the script's own `timeout 180` kills it. Three runs, same result. The other thirteen
 checks pass.
@@ -301,6 +311,19 @@ detach from, and something not yet considered.
 Not blocking phase 4: the feature works — the same deploy succeeds through the daemon in about a
 second, and the fallback's own message prints correctly. What is untrustworthy is the *bound*, which
 means a pathological deploy can still stall a CLI invocation indefinitely.
+
+**Hardened 2026-09-20:** `run_stages` now wraps the whole Healthcheck stage in a
+90s `tokio::time::timeout` (`HEALTHCHECK_STAGE_CAP`) that is independent of
+`poll_health`'s internal budget. The internal bound assumes the runtime can
+yield to timers — a child that cancellation does not detach from (one of the
+two live hypotheses above) stalls the future without resolving. The stage-level
+cap sits outside that machinery, so even then the stage fails with a named
+error (`healthcheck stage exceeded its 90s hard cap`) and the deploy rolls
+back. Pinned by a regression test with an executor whose healthcheck never
+resolves (`a_healthcheck_that_never_resolves_is_cut_by_the_stage_cap_and_rolls_back`).
+So the residual risk from this entry is reduced to: a hang on a single-threaded
+runtime with no timer thread — the CLI runs `#[tokio::main]` (multi-threaded),
+so that case does not apply to the fallback path that this entry is about.
 
 ## From phase 4 — a followed stream holds a `journalctl` for up to 30 minutes
 

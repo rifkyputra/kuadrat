@@ -4,8 +4,9 @@
 //! `RolledBack` when the undo succeeds and `Failed` when it also fails.
 
 use std::path::Path;
+use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::{anyhow, Context as _, Result};
 
 use crate::deploy::build::build;
 use crate::deploy::detect::detect;
@@ -16,6 +17,19 @@ use crate::gateway::{apply_route, remove_route};
 use crate::secrets::ensure_all;
 use crate::spec::{slug, WorkloadSpec};
 use crate::workloads::apply::{apply, remove};
+
+/// Hard cap for the whole Healthcheck stage, independent of
+/// [`crate::deploy::health`]'s internal wall-clock budget. That budget is
+/// bounded on paper (60s total, 5s per attempt, `kill_on_drop` on the child),
+/// but it assumes the runtime can yield to timers — a child that cancellation
+/// does not detach from (the open possibility from the H7 acceptance hang in
+/// docs/known-gaps.md) stalls the future without ever resolving it. This cap
+/// sits outside that machinery: even then the stage fails with a named error
+/// and the deploy rolls back instead of hanging a CLI invocation forever.
+/// 90s = the 60s poll budget plus interval slack, so a normal unhealthy
+/// deploy still gets its full budget; only a never-resolving health command
+/// trips this.
+const HEALTHCHECK_STAGE_CAP: Duration = Duration::from_secs(90);
 
 /// Deploy `spec` from the repo at `repo`. Returns the terminal outcome
 /// (`Done`/`RolledBack`/`Failed`); returns `Err` only when the deploy could not
@@ -203,7 +217,18 @@ async fn run_stages(
     ok(ctx, deploy_id, Stage::Route)?;
 
     begin(ctx, deploy_id, Stage::Healthcheck)?;
-    if let Err(e) = healthcheck(ctx.exec, &spec).await {
+    let health = tokio::time::timeout(HEALTHCHECK_STAGE_CAP, healthcheck(ctx.exec, &spec))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "healthcheck stage exceeded its {}s hard cap",
+                HEALTHCHECK_STAGE_CAP.as_secs()
+            )
+        })
+        // timeouts wrap the stage's own `Result`; flatten both layers so a
+        // failing healthcheck still rolls back instead of passing the stage.
+        .and_then(|res| res);
+    if let Err(e) = health {
         return fail(ctx, deploy_id, &spec, slug, previous, Stage::Healthcheck, e).await;
     }
     ok(ctx, deploy_id, Stage::Healthcheck)?;
@@ -358,6 +383,7 @@ mod tests {
     use crate::events::{EventKind, EventSink, StoredEvent};
     use crate::exec::fake::FakeExecutor;
     use crate::exec::CommandOutput;
+    use crate::exec::Executor;
     use crate::fs::fake::FakeFileSystem;
     use crate::spec::WorkloadSpec;
     use crate::store::Store;
@@ -643,6 +669,71 @@ mod tests {
             }
             other => panic!("expected RolledBack at Healthcheck, got {other:?}"),
         }
+    }
+
+    /// A health check that never resolves must not stall the deploy machine:
+    /// the stage-level cap (`HEALTHCHECK_STAGE_CAP`) fails the stage and rolls
+    /// back even when `poll_health`'s own budget can never fire — a child that
+    /// cancellation does not detach from is exactly the case neither the
+    /// per-attempt timeout nor `kill_on_drop` can end.
+    #[tokio::test(start_paused = true)]
+    async fn a_healthcheck_that_never_resolves_is_cut_by_the_stage_cap_and_rolls_back() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("k.db")).unwrap();
+        let paths = Paths::rooted(dir.path());
+        let fsys = fsys_with_repo();
+
+        // Forward path succeeds until the healthcheck. The podman healthcheck
+        // call is intercepted by the executor below and never resolves.
+        let fake = FakeExecutor::new();
+        script_clean(&fake, "abc123", "web", out(0, "", ""));
+        // Compensation: no previous spec → remove the unit we wrote (stop +
+        // the daemon-reload already scripted above).
+        fake.expect_call("systemctl", &["stop", "kuadrat-web"], out(0, "", ""));
+
+        // A `podman healthcheck` that never resolves; everything else
+        // delegates to the fake above. An unscripted call would panic in the
+        // fake, so the wrong path fails the test on its own.
+        struct HangingHealthcheck {
+            inner: FakeExecutor,
+        }
+
+        #[async_trait::async_trait]
+        impl Executor for HangingHealthcheck {
+            async fn run(
+                &self,
+                program: &str,
+                args: &[String],
+            ) -> anyhow::Result<crate::exec::CommandOutput> {
+                if program == "podman" && args.first().map(String::as_str) == Some("healthcheck") {
+                    // Never resolves: cut by the stage cap, not by finishing.
+                    std::future::pending().await
+                }
+                self.inner.run(program, args).await
+            }
+        }
+
+        let mut spec = WorkloadSpec::new("web", "placeholder");
+        spec.health_cmd = Some("true".into());
+        let exec = HangingHealthcheck { inner: fake };
+        let ctx = Ctx {
+            exec: &exec,
+            fsys: &fsys,
+            store: &store,
+            paths: &paths,
+            sink: &NullSink,
+        };
+        let outcome = run(&ctx, spec, Path::new("/repo"))
+            .await
+            .expect("terminal outcome");
+
+        match outcome {
+            DeployOutcome::RolledBack { failed_at, .. } => {
+                assert_eq!(failed_at, Stage::Healthcheck)
+            }
+            other => panic!("expected RolledBack at Healthcheck, got {other:?}"),
+        }
+        assert!(store.acquire_lock("web", 999).unwrap(), "lock released");
     }
 
     #[tokio::test]
