@@ -1,4 +1,4 @@
-.PHONY: build check test fmt
+.PHONY: build check test fmt install uninstall
 
 build:
 	cargo build
@@ -12,3 +12,9 @@ test:
 
 fmt:
 	cargo fmt
+
+install:
+	sudo bash scripts/install.sh
+
+uninstall:
+	sudo bash scripts/install.sh --uninstall

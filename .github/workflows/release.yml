@@ -1,0 +1,32 @@
+name: release
+
+# Build a release artifact for every version tag (v*): the static binary, the
+# shipped systemd unit, and a SHA256 manifest. This is what `scripts/install.sh`
+# installs from — download the tagged binary + unit, then:
+#   sudo bash scripts/install.sh ./kuadrat-vX.Y.Z ./kuadrat.service
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release binary
+        run: cargo build --release
+      - name: Stage release assets
+        run: |
+          mkdir -p dist
+          cp target/release/kuadrat "dist/kuadrat-${GITHUB_REF_NAME}"
+          cp packaging/kuadrat.service dist/kuadrat.service
+          (cd dist && sha256sum kuadrat-* kuadrat.service > SHASUMS.txt)
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true

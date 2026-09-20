@@ -88,14 +88,40 @@ fragments touch `/etc` and `/var/lib`, so they need **root**.
 
 ### Install
 
+Two ways in, one way out — `scripts/install.sh` is the single entry point for
+install, upgrade, and uninstall, and it is idempotent by construction
+(re-running with a newer binary in place is the upgrade). It places the
+binary at `/usr/local/bin`, writes the shipped `packaging/kuadrat.service`, and
+enables + starts the daemon.
+
+**From source:**
+
 ```bash
 git clone git@github.com:rifkyputra/kuadrat.git && cd kuadrat
-cargo build --release          # binary at target/release/kuadrat
-sudo install -m755 target/release/kuadrat /usr/local/bin/
+sudo make install        # builds the release binary, then installs and starts the service
 ```
 
-Needs Podman 4.4+, systemd on cgroups v2, and `git`. Caddy is only required if you route an app
-(see [Routing](#routing-an-app)).
+**From a release artifact** (binary + unit + SHA256 manifest are attached to
+every `v*` GitHub release):
+
+```bash
+# download kuadrat-vX.Y.Z and kuadrat.service from the release page
+sudo bash scripts/install.sh ./kuadrat-vX.Y.Z ./kuadrat.service
+```
+
+**Upgrade:** get the newer binary (pull + `make` or download the newer
+release) and re-run the install command — the unit is rewritten and the
+service restarts onto the new binary. `kuadrat --version` prints the running
+version.
+
+**Uninstall:**
+
+```bash
+sudo make uninstall      # or: sudo bash scripts/install.sh --uninstall
+```
+
+Needs Podman 4.4+, systemd on cgroups v2, and `git`. Caddy is only required if
+you route an app (see [Routing](#routing-an-app)).
 
 ### Your first deploy
 

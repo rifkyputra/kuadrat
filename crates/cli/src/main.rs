@@ -15,6 +15,7 @@ mod resolve;
 #[derive(Parser)]
 #[command(
     name = "kuadrat",
+    version,
     about = "Podman Quadlet deployment for a single host"
 )]
 struct Cli {

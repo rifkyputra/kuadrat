@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt + clippy + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Mirrors `make check` — fmt is a hard gate, clippy runs with -D warnings
+      # so a lint is a build failure, not a suggestion.
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint (clippy -D warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Mirrors `make test`. The suite is hermetic — no daemon, no podman, no
+      # root — so a plain Ubuntu runner is enough.
+      - name: Run tests
+        run: cargo test --all

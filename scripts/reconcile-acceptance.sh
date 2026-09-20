@@ -47,7 +47,12 @@ sqlite3 "$DB" "INSERT INTO locks (app, deploy_id) VALUES ('$APP', (SELECT max(id
   && ok "injected a stuck in_progress deploy" || bad "injection failed"
 
 echo "== the stuck lock blocks a new deploy"
-"$BIN" deploy "$APP" "$WORK/$APP" 2>&1 | grep -q 'already in progress' \
+# Capture before grepping: the blocked deploy exits non-zero BY DESIGN (only
+# `Done` is success), and `set -o pipefail` would turn that rc=1 into the
+# pipeline's status even when grep matched — a false FAIL. A plain assignment
+# keeps the two apart: the rc we act on is grep's.
+DEP_OUT=$("$BIN" deploy "$APP" "$WORK/$APP" 2>&1)
+echo "$DEP_OUT" | grep -q 'already in progress' \
   && ok "the held lock blocks a deploy" || bad "a deploy was NOT blocked by the stuck lock"
 
 echo "== reconcile"
